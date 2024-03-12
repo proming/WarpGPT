@@ -214,14 +214,6 @@ func (p *UnofficialApiProcess) MakeRequest(requestBody map[string]interface{}) (
 	if err != nil {
 		return nil, err
 	}
-	ws := wsstostream.NewWssToStream(p.GetContext().RequestHeaders.Get("Authorization"))
-	err = ws.InitConnect()
-	p.WS = ws
-	if err != nil {
-		logger.Log.Error(err)
-		p.GetContext().GinContext.JSON(500, gin.H{"error": err.Error()})
-		return nil, err
-	}
 	response, err := p.GetContext().RequestClient.Do(request)       //发送请求
 	common.CopyResponseHeaders(response, p.GetContext().GinContext) //设置响应头
 	if err != nil {
@@ -338,9 +330,18 @@ func (p *UnofficialApiProcess) streamChatProcess(raw string) string {
 func (p *UnofficialApiProcess) response(response *http.Response, mid func(p *UnofficialApiProcess, a string) bool) error {
 	context.Logger.Debug("UnofficialApiProcess streamResponse")
 	var client *tools.SSEClient
-	if strings.Contains(p.Context.RequestParam, "/ws") {
+	var contentType = response.Header.Get("Content-Type")
+	if strings.Contains(contentType, "application/json") {
+		ws := wsstostream.NewWssToStream(p.GetContext().RequestHeaders.Get("Authorization"))
+		err := ws.InitConnect()
+		p.WS = ws
+		if err != nil {
+			logger.Log.Error(err)
+			p.GetContext().GinContext.JSON(500, gin.H{"error": err.Error()})
+			return err
+		}
 		var jsonData WsResponse
-		err := json.NewDecoder(response.Body).Decode(&jsonData)
+		err = json.NewDecoder(response.Body).Decode(&jsonData)
 		if err != nil {
 			logger.Log.Error(err)
 			return err
