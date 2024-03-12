@@ -25,10 +25,11 @@ func CopyResponseHeaders(response *fhttp.Response, ctx *gin.Context) {
 		return
 	}
 	skipHeaders := map[string]bool{
-		"content-encoding":true,
-		"content-length":true,
-		"transfer-encoding":true,
-		"connection":true,
+		"content-encoding":            true,
+		"content-length":              true,
+		"transfer-encoding":           true,
+		"connection":                  true,
+		"Access-Control-Allow-Origin": true,
 	}
 	for name, values := range response.Header {
 		if !skipHeaders[name] {
@@ -37,4 +38,5 @@ func CopyResponseHeaders(response *fhttp.Response, ctx *gin.Context) {
 			}
 		}
 	}
+	ctx.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 }
