@@ -198,9 +198,17 @@ type ApiImageGenerationRespStr struct {
 	Created int64          `json:"created"`
 	Data    []ApiImageItem `json:"data"`
 }
+type ApiImageGenerationRespB64Str struct {
+	Created int64                `json:"created"`
+	Data    []ApiImageBase64Item `json:"data"`
+}
 type ApiImageItem struct {
 	RevisedPrompt string `json:"revised_prompt"`
 	Url           string `json:"url"`
+}
+type ApiImageBase64Item struct {
+	RevisedPrompt string `json:"revised_prompt"`
+	B64Json       string `json:"b64_json"`
 }
 type ApiImageGenerationErrorRespStr struct {
 	Error struct {

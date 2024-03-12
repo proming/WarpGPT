@@ -6,19 +6,22 @@ import (
 	"WarpGPT/pkg/plugins"
 	"WarpGPT/pkg/tools"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	http "github.com/bogdanfinn/fhttp"
-	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/pkoukk/tiktoken-go"
 	"io"
 	shttp "net/http"
 	"strings"
 	"time"
 
+	http "github.com/bogdanfinn/fhttp"
+	tls_client "github.com/bogdanfinn/tls-client"
+	"github.com/pkoukk/tiktoken-go"
+
 	"WarpGPT/pkg/logger"
 	"WarpGPT/pkg/plugins/service/wsstostream"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -52,16 +55,18 @@ type UnofficialApiProcess struct {
 	OldString        string
 	Mode             string
 	ImagePointerList []ImagePointer
+	ResponseFormat   string
 }
 type ImagePointer struct {
 	Pointer string
 	Prompt  string
 }
 type Result struct {
-	ApiRespStrStream          ApiRespStrStream
-	ApiRespStrStreamEnd       ApiRespStrStreamEnd
-	ApiImageGenerationRespStr ApiImageGenerationRespStr
-	Pass                      bool
+	ApiRespStrStream             ApiRespStrStream
+	ApiRespStrStreamEnd          ApiRespStrStreamEnd
+	ApiImageGenerationRespStr    ApiImageGenerationRespStr
+	ApiImageGenerationRespB64Str ApiImageGenerationRespB64Str
+	Pass                         bool
 }
 
 func (p *UnofficialApiProcess) SetContext(conversation Context) {
@@ -92,7 +97,7 @@ func (p *UnofficialApiProcess) ProcessMethod() {
 		return
 	}
 	p.Model = modelStr
-	
+
 	if strings.Contains(p.GetContext().RequestParam, "chat/completions") {
 		p.Mode = "chat"
 		if err = p.chatApiProcess(requestBody); err != nil {
@@ -119,6 +124,7 @@ func (p *UnofficialApiProcess) imageApiProcess(requestBody map[string]interface{
 	}
 	result := new(Result)
 	result.ApiImageGenerationRespStr = ApiImageGenerationRespStr{}
+	result.ApiImageGenerationRespB64Str = ApiImageGenerationRespB64Str{}
 	err = p.response(response, func(p *UnofficialApiProcess, a string) bool {
 		p.jsonImageProcess(a)
 		return false
@@ -130,6 +136,9 @@ func (p *UnofficialApiProcess) imageApiProcess(requestBody map[string]interface{
 	if result.ApiImageGenerationRespStr.Created != 0 {
 		p.GetContext().GinContext.Header("Content-Type", "application/json")
 		p.GetContext().GinContext.JSON(response.StatusCode, result.ApiImageGenerationRespStr)
+	} else if result.ApiImageGenerationRespB64Str.Created != 0 {
+		p.GetContext().GinContext.Header("Content-Type", "application/json")
+		p.GetContext().GinContext.JSON(response.StatusCode, result.ApiImageGenerationRespB64Str)
 	}
 	if err != nil {
 		return err
@@ -395,51 +404,72 @@ func (p *UnofficialApiProcess) getImageUrlByPointer(imagePointerList *[]ImagePoi
 		}
 		if imageDownloadUrl != nil && imageDownloadUrl.DownloadUrl != "" {
 			context.Logger.Debug("getDownloadUrl")
-			imageItem := new(ApiImageItem)
-			result.ApiImageGenerationRespStr.Created = time.Now().Unix()
-			imageItem.Url = imageDownloadUrl.DownloadUrl
-			imageItem.RevisedPrompt = v.Prompt
-			result.ApiImageGenerationRespStr.Data = append(result.ApiImageGenerationRespStr.Data, *imageItem)
+			if p.ResponseFormat == "url" {
+				imageItem := new(ApiImageItem)
+				result.ApiImageGenerationRespStr.Created = time.Now().Unix()
+				imageItem.Url = imageDownloadUrl.DownloadUrl
+				imageItem.RevisedPrompt = v.Prompt
+				result.ApiImageGenerationRespStr.Data = append(result.ApiImageGenerationRespStr.Data, *imageItem)
+			} else {
+				imageItem := new(ApiImageBase64Item)
+				result.ApiImageGenerationRespB64Str.Created = time.Now().Unix()
+				resp, err := shttp.Get(imageDownloadUrl.DownloadUrl)
+				if err != nil {
+					return err
+				}
+				defer resp.Body.Close()
+
+				// Read image data
+				imageBytes, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return err
+				}
+				// Convert image data to Base64 string
+				base64String := base64.StdEncoding.EncodeToString(imageBytes)
+				imageItem.B64Json = base64String
+				imageItem.RevisedPrompt = v.Prompt
+				result.ApiImageGenerationRespB64Str.Data = append(result.ApiImageGenerationRespB64Str.Data, *imageItem)
+			}
 		}
 	}
 	return nil
 }
 
 func (p *UnofficialApiProcess) getStreamResp(stream string) *Result {
-    context.Logger.Debug("getStreamResp")
-    var chatRespStr ChatRespStr
-    var chatEndRespStr ChatEndRespStr
-    result := new(Result)
-    result.ApiRespStrStreamEnd = ApiRespStrStreamEnd{}
-    result.ApiRespStrStream = ApiRespStrStream{}
-    result.Pass = false
+	context.Logger.Debug("getStreamResp")
+	var chatRespStr ChatRespStr
+	var chatEndRespStr ChatEndRespStr
+	result := new(Result)
+	result.ApiRespStrStreamEnd = ApiRespStrStreamEnd{}
+	result.ApiRespStrStream = ApiRespStrStream{}
+	result.Pass = false
 
-    errRespStr := json.Unmarshal([]byte(stream), &chatRespStr)
-    if errRespStr == nil && chatRespStr.Message.Id != "" {
-        if chatRespStr.Message.Metadata.ParentId == "" {
-            result.Pass = true
-        } else {
-            resp := GetApiRespStrStream(p.ID)
-            choice := GetStreamChoice()
-            resp.Model = p.Model
-            choice.Delta.Content = strings.ReplaceAll(chatRespStr.Message.Content.Parts[0], p.OldString, "")
-            p.OldString = chatRespStr.Message.Content.Parts[0]
-            resp.Choices = resp.Choices[:0]
-            resp.Choices = append(resp.Choices, *choice)
-            result.ApiRespStrStream = *resp
-        }
-    } else {
-        errEndRespStr := json.Unmarshal([]byte(stream), &chatEndRespStr)
-        if errEndRespStr == nil && chatEndRespStr.IsCompletion {
-            resp := GetApiRespStrStreamEnd(p.ID)
-            resp.Model = p.Model
-            result.ApiRespStrStreamEnd = *resp
-        }
-    }
-    if result.ApiRespStrStream.Id == "" && result.ApiRespStrStreamEnd.Id == "" {
-        result.Pass = true
-    }
-    return result
+	errRespStr := json.Unmarshal([]byte(stream), &chatRespStr)
+	if errRespStr == nil && chatRespStr.Message.Id != "" {
+		if chatRespStr.Message.Metadata.ParentId == "" {
+			result.Pass = true
+		} else {
+			resp := GetApiRespStrStream(p.ID)
+			choice := GetStreamChoice()
+			resp.Model = p.Model
+			choice.Delta.Content = strings.ReplaceAll(chatRespStr.Message.Content.Parts[0], p.OldString, "")
+			p.OldString = chatRespStr.Message.Content.Parts[0]
+			resp.Choices = resp.Choices[:0]
+			resp.Choices = append(resp.Choices, *choice)
+			result.ApiRespStrStream = *resp
+		}
+	} else {
+		errEndRespStr := json.Unmarshal([]byte(stream), &chatEndRespStr)
+		if errEndRespStr == nil && chatEndRespStr.IsCompletion {
+			resp := GetApiRespStrStreamEnd(p.ID)
+			resp.Model = p.Model
+			result.ApiRespStrStreamEnd = *resp
+		}
+	}
+	if result.ApiRespStrStream.Id == "" && result.ApiRespStrStreamEnd.Id == "" {
+		result.Pass = true
+	}
+	return result
 }
 
 func (p *UnofficialApiProcess) checkModel(model string) (string, error) {
@@ -500,6 +530,13 @@ func (p *UnofficialApiProcess) generateBody(req *ChatReqStr, requestBody map[str
 		size, exists := requestBody["size"]
 		if !exists {
 			size = "1024x1024"
+		}
+		response_format, exists := requestBody["response_format"]
+		if exists {
+			logger.Log.Info("response_format=", response_format)
+			p.ResponseFormat = response_format.(string)
+		} else {
+			p.ResponseFormat = "url"
 		}
 		reqMessage := GetChatReqTemplate()
 		reqMessage.Content.Parts = reqMessage.Content.Parts[:0]
